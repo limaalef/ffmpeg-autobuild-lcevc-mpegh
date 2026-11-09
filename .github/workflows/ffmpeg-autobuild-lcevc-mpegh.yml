@@ -2,7 +2,7 @@ name: Build Custom FFmpeg (limaalef)
  
 on:
   schedule:
-    - cron: '0 6 * * 6'
+    - cron: '0 6 * * *'
   workflow_dispatch:
     inputs:
       ffmpeg_ref:

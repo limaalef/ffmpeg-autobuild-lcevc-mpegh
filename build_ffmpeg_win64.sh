@@ -138,6 +138,9 @@ cmake -S mpeghdec -B mpeghdec/build "${CMAKE_COMMON[@]}" \
   -DCMAKE_EXE_LINKER_FLAGS="-static -static-libgcc -static-libstdc++"
 cmake --build mpeghdec/build -j"$JOBS"
 cmake --install mpeghdec/build
+# Garante que os executáveis fiquem salvos no prefixo em cache:
+mkdir -p "$WIN_PREFIX/bin"
+find mpeghdec/build -maxdepth 3 -iname 'mpegh*.exe' -exec cp -f {} "$WIN_PREFIX/bin/" \;
 
 # Corrige linkagem estática do mpeghdec no MinGW (remove dllimport e une todas as sub-libs .o):
 sed -i 's/__declspec(dllimport)//g' "$WIN_PREFIX"/include/mpeghdec/*.h
@@ -573,13 +576,26 @@ done
 # =============================================================================
 step "7/8 SDL2 para suportar compilação do FFplay"
 # =============================================================================
-clone https://github.com/libsdl-org/SDL.git sdl2
-rm -rf sdl2/build
-cmake -S sdl2 -B sdl2/build "${CMAKE_COMMON[@]}" \
-  -DSDL_SHARED=OFF -DSDL_STATIC=ON \
-  -DSDL_TESTS=OFF -DSDL_RENDER_D3D=ON
-cmake --build sdl2/build -j"$JOBS"
-cmake --install sdl2/build
+cd "$SRC"
+
+if [ ! -f "$WIN_PREFIX/lib/libSDL2.a" ]; then
+  rm -rf sdl2
+  git clone --depth 1 --branch SDL2 https://github.com/libsdl-org/SDL.git sdl2
+
+  cmake -S sdl2 -B sdl2/build "${CMAKE_COMMON[@]}" \
+    -DSDL_SHARED=OFF \
+    -DSDL_STATIC=ON \
+    -DSDL_TEST=OFF \
+    -DSDL_TESTS=OFF \
+    -DSDL_RENDER_D3D=ON
+  cmake --build sdl2/build -j"$JOBS"
+  cmake --install sdl2/build
+
+  # Garante que todas as libs do Windows exigidas pela SDL2 estática estejam no sdl2.pc
+  if [ -f "$WIN_PREFIX/lib/pkgconfig/sdl2.pc" ]; then
+    sed -i '/^Libs:/ s/$/ -lwinmm -limm32 -lole32 -loleaut32 -lversion -luuid -lsetupapi -lgdi32 -luser32 -lshell32/' "$WIN_PREFIX/lib/pkgconfig/sdl2.pc"
+  fi
+fi
 
 # -----------------------------------------------------------------------------
 step "8/8 FFmpeg"
@@ -627,6 +643,7 @@ export PKG_CONFIG_PATH="$WIN_PREFIX/lib/pkgconfig:$WIN_PREFIX/share/pkgconfig"
   --extra-libs="-lstdc++ -lpthread -lm -lgdi32 -ldwrite -lusp10 -luser32 -lwinmm -limm32 -lole32 -loleaut32 -lversion -luuid -ladvapi32 -lshell32 -lsetupapi" \
   --enable-static --disable-shared \
   --enable-ffplay \
+  --enable-sdl2 \
   --disable-doc --disable-debug \
   --enable-gpl --enable-version3 --enable-nonfree \
   --enable-zlib --enable-bzlib --enable-lzma --enable-iconv \
