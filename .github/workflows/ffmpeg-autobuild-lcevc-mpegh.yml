@@ -1,8 +1,8 @@
 name: Build Custom FFmpeg (limaalef)
-
+ 
 on:
   schedule:
-    - cron: '0 6 * * *'
+    - cron: '0 6 * * 6'
   workflow_dispatch:
     inputs:
       ffmpeg_ref:
@@ -13,21 +13,21 @@ on:
         description: 'Forçar recompilação mesmo se a release já existir'
         type: boolean
         default: false
-
+ 
 permissions:
   contents: write
-
+ 
 env:
   # Silencia avisos de transição Node 20 -> Node 24 nas actions oficiais
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
+ 
 jobs:
   build_win64:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout do repositório
         uses: actions/checkout@v4
-
+ 
       - name: Detectar versão do FFmpeg
         id: check_version
         env:
@@ -45,39 +45,49 @@ jobs:
               | grep -E '^n[0-9]+\.[0-9]+(\.[0-9]+)?$' \
               | sort -V | tail -n1)
           fi
-
+ 
           if [ -z "$TARGET_REF" ]; then
             TARGET_REF="master"
           fi
-
+ 
+          # Data da build (fuso de Brasília), formato AAAAMMDD
+          BUILD_DATE=$(TZ=America/Sao_Paulo date +%Y%m%d)
+ 
           if [ "$TARGET_REF" = "master" ]; then
             COMMIT_HASH=$(git ls-remote https://github.com/FFmpeg/FFmpeg.git refs/heads/master | cut -c1-7)
             CLEAN_VER="git-${COMMIT_HASH}"
-            RELEASE_TAG="ffmpeg-${CLEAN_VER}-limaalef"
+            RELEASE_PREFIX="ffmpeg-${CLEAN_VER}-"
           else
             CLEAN_VER="${TARGET_REF#n}"
-            RELEASE_TAG="ffmpeg-v${CLEAN_VER}-limaalef"
+            RELEASE_PREFIX="ffmpeg-v${CLEAN_VER}-"
           fi
-
+          RELEASE_TAG="${RELEASE_PREFIX}${BUILD_DATE}-limaalef"
+ 
           echo "target_ref=$TARGET_REF" >> "$GITHUB_OUTPUT"
           echo "clean_ver=$CLEAN_VER" >> "$GITHUB_OUTPUT"
+          echo "build_date=$BUILD_DATE" >> "$GITHUB_OUTPUT"
           echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
-
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1 && [ "$FORCE" != "true" ]; then
-            echo "Release $RELEASE_TAG já publicada. Encerrando."
+ 
+          # A data faz parte da tag, então a checagem compara só o prefixo da versão:
+          # se já existe QUALQUER release dessa versão do FFmpeg, não recompila.
+          EXISTING=$(gh release list --limit 1000 --json tagName \
+            --jq ".[] | select(.tagName | startswith(\"${RELEASE_PREFIX}\")) | .tagName" 2>/dev/null | head -n1)
+ 
+          if [ -n "$EXISTING" ] && [ "$FORCE" != "true" ]; then
+            echo "Versão já publicada na release $EXISTING. Encerrando."
             echo "should_build=false" >> "$GITHUB_OUTPUT"
           else
             echo "Nova build necessária: $RELEASE_TAG (ref: $TARGET_REF)"
             echo "should_build=true" >> "$GITHUB_OUTPUT"
           fi
-
+ 
       - name: Cache das bibliotecas compiladas (win64_prefix)
         if: steps.check_version.outputs.should_build == 'true'
         uses: actions/cache@v4
         with:
           path: ~/build_win64/win64_prefix
           key: win64-prefix-v3-${{ hashFiles('build_ffmpeg_win64.sh') }}
-
+ 
       - name: Compilar FFmpeg e bibliotecas
         if: steps.check_version.outputs.should_build == 'true'
         env:
@@ -87,7 +97,7 @@ jobs:
           sed -i 's/\r$//' build_ffmpeg_win64.sh
           chmod +x build_ffmpeg_win64.sh
           ./build_ffmpeg_win64.sh
-
+ 
       - name: Exibir log de erro detalhado (se a compilação falhar)
         if: failure()
         run: |
@@ -102,11 +112,15 @@ jobs:
         run: |
           OUT_BIN="$HOME/build_win64/ffmpeg_out/bin"
           PREFIX_BIN="$HOME/build_win64/win64_prefix/bin"
-          ZIP_NAME="ffmpeg-${{ steps.check_version.outputs.clean_ver }}-win64-static-limaalef.zip"
-
-          # Copia o mpeghDecoder.exe, mpeghUIManager.exe e quaisquer outras ferramentas do prefix para a pasta bin final
-          cp -f "$PREFIX_BIN"/*.exe "$OUT_BIN"/ 2>/dev/null || true
-          
+          ZIP_NAME="ffmpeg-${{ steps.check_version.outputs.clean_ver }}-${{ steps.check_version.outputs.build_date }}-win64-static-limaalef.zip"
+ 
+          # Copia SOMENTE as ferramentas do mpeghdec (o prefix também contém exes de
+          # libjpeg-turbo, xz etc. que não devem ir para o zip). O "cmake --install"
+          # não as instala, então buscamos na pasta de build e, por garantia, no prefix.
+          MPEGH_BUILD_BIN="$HOME/build_win64/src/mpeghdec/build/bin"
+          find "$MPEGH_BUILD_BIN" "$PREFIX_BIN" -maxdepth 1 -iname 'mpegh*.exe' \
+            -exec cp -f {} "$OUT_BIN"/ \; 2>/dev/null || true
+ 
           # Garante que o ffplay.exe também foi copiado se gerado em subpastas
           find "$HOME/build_win64/src/ffmpeg" -name "ffplay.exe" -exec cp -f {} "$OUT_BIN"/ \; 2>/dev/null || true
 
@@ -133,12 +147,12 @@ jobs:
         run: |
           TAG="${{ steps.check_version.outputs.release_tag }}"
           ZIP_PATH="$GITHUB_WORKSPACE/${{ steps.package.outputs.zip_name }}"
-
+ 
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release delete "$TAG" --yes --cleanup-tag
           fi
-
+ 
           gh release create "$TAG" "$ZIP_PATH" \
-            --title "FFmpeg ${{ steps.check_version.outputs.clean_ver }} Win64 Static (by limaalef)" \
+            --title "FFmpeg ${{ steps.check_version.outputs.clean_ver }} Win64 Static ${{ steps.check_version.outputs.build_date }} (by limaalef)" \
             --notes-file "$GITHUB_WORKSPACE/release_notes.md" \
             --latest
