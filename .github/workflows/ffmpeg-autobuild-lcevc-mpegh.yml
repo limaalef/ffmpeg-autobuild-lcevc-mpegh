@@ -1,10 +1,8 @@
 name: Build Custom FFmpeg (limaalef)
 
 on:
-  # Verifica diariamente às 06:00 UTC se o FFmpeg lançou uma nova release oficial
   schedule:
     - cron: '0 6 * * *'
-  # Permite disparar manualmente pela aba Actions (escolhendo tag ou master)
   workflow_dispatch:
     inputs:
       ffmpeg_ref:
@@ -18,6 +16,10 @@ on:
 
 permissions:
   contents: write
+
+env:
+  # Silencia avisos de transição Node 20 -> Node 24 nas actions oficiais
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build_win64:
@@ -33,18 +35,23 @@ jobs:
           INPUT_REF: ${{ github.event.inputs.ffmpeg_ref }}
           FORCE: ${{ github.event.inputs.force_build }}
         run: |
+          set +o pipefail
           if [ -n "$INPUT_REF" ]; then
             TARGET_REF="$INPUT_REF"
           else
-            # Busca a última tag de release estável (ex: n7.1, n7.1.1, n8.0)
-            TARGET_REF=$(git ls-remote --tags --refs https://git.ffmpeg.org/ffmpeg.git \
+            # Busca a última tag de release estável do espelho oficial no GitHub (mais rápido e confiável que git.ffmpeg.org)
+            TARGET_REF=$(git ls-remote --tags --refs https://github.com/FFmpeg/FFmpeg.git \
               | awk -F'/' '{print $3}' \
               | grep -E '^n[0-9]+\.[0-9]+(\.[0-9]+)?$' \
               | sort -V | tail -n1)
           fi
 
+          if [ -z "$TARGET_REF" ]; then
+            TARGET_REF="master"
+          fi
+
           if [ "$TARGET_REF" = "master" ]; then
-            COMMIT_HASH=$(git ls-remote https://git.ffmpeg.org/ffmpeg.git refs/heads/master | cut -c1-7)
+            COMMIT_HASH=$(git ls-remote https://github.com/FFmpeg/FFmpeg.git refs/heads/master | cut -c1-7)
             CLEAN_VER="git-${COMMIT_HASH}"
             RELEASE_TAG="ffmpeg-${CLEAN_VER}-limaalef"
           else
@@ -56,7 +63,6 @@ jobs:
           echo "clean_ver=$CLEAN_VER" >> "$GITHUB_OUTPUT"
           echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
 
-          # Verifica se essa Release já foi publicada no seu repositório
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1 && [ "$FORCE" != "true" ]; then
             echo "Release $RELEASE_TAG já publicada. Encerrando."
             echo "should_build=false" >> "$GITHUB_OUTPUT"
@@ -70,15 +76,25 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/build_win64/win64_prefix
-          key: win64-prefix-v2-${{ hashFiles('build_ffmpeg_win64.sh') }}
+          key: win64-prefix-v3-${{ hashFiles('build_ffmpeg_win64.sh') }}
 
       - name: Compilar FFmpeg e bibliotecas
         if: steps.check_version.outputs.should_build == 'true'
         env:
           FFMPEG_BRANCH: ${{ steps.check_version.outputs.target_ref }}
         run: |
+          # Remove quebras de linha CRLF do Windows caso existam no script
+          sed -i 's/\r$//' build_ffmpeg_win64.sh
           chmod +x build_ffmpeg_win64.sh
           ./build_ffmpeg_win64.sh
+
+      - name: Exibir log de erro detalhado (se a compilação falhar)
+        if: failure()
+        run: |
+          echo "=== ÚLTIMAS 100 LINHAS DO BUILD.LOG ==="
+          tail -n 100 ~/build_win64/build.log || true
+          echo "=== ÚLTIMAS 80 LINHAS DO FFBUILD/CONFIG.LOG (SE EXISTIR) ==="
+          tail -n 80 ~/build_win64/src/ffmpeg/ffbuild/config.log || true
 
       - name: Empacotar binários e gerar notas da versão
         if: steps.check_version.outputs.should_build == 'true'
@@ -88,23 +104,26 @@ jobs:
           PREFIX_BIN="$HOME/build_win64/win64_prefix/bin"
           ZIP_NAME="ffmpeg-${{ steps.check_version.outputs.clean_ver }}-win64-static-limaalef.zip"
 
-          # Copia também utilitários estáticos gerados (ex: mpeghDecoder.exe) se existirem
+          # Copia o mpeghDecoder.exe, mpeghUIManager.exe e quaisquer outras ferramentas do prefix para a pasta bin final
           cp -f "$PREFIX_BIN"/*.exe "$OUT_BIN"/ 2>/dev/null || true
+          
+          # Garante que o ffplay.exe também foi copiado se gerado em subpastas
+          find "$HOME/build_win64/src/ffmpeg" -name "ffplay.exe" -exec cp -f {} "$OUT_BIN"/ \; 2>/dev/null || true
 
           cd "$OUT_BIN"
+          # Compacta todos os executáveis (.exe) juntos no .zip final
           7z a "$GITHUB_WORKSPACE/$ZIP_NAME" *.exe
 
           echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
 
-          # Gera resumo para a página de Release do GitHub
-          cat > "$GITHUB_WORKSPACE/release_notes.md" << EOF
+          cat > "$GITHUB_WORKSPACE/release_notes.md" << 'EOF'
           ### FFmpeg ${{ steps.check_version.outputs.clean_ver }} (Windows x64 Static) — Build by **limaalef**
 
-          * **Versão / Ref:** \`${{ steps.check_version.outputs.target_ref }}\` (\`${{ steps.check_version.outputs.clean_ver }}-limaalef\`)
+          * **Binários incluídos:** \`ffmpeg.exe\`, \`ffprobe.exe\`, \`ffplay.exe\`, \`mpeghDecoder.exe\`, \`mpeghUIManager.exe\`
           * **Compilador:** MinGW-w64 GCC POSIX (Static)
-          * **DTV / TV 3.0:** \`liblcevc-dec\`, \`libmpeghdec\`, \`vvc\` (nativo), \`libaribb24\`, \`libxml2\` (DASH)
-          * **Vídeo & Imagem:** \`libx264\`, \`libx265\` (8/10/12-bit), \`libvpx\`, \`libdav1d\`, \`libsvtav1\`, \`nvenc\`, \`d3d11va\`, \`png\`, \`mjpeg\`, \`libwebp\`, \`libopenjpeg\`, \`libzimg\`
-          * **Áudio & Legendas:** \`libfdk-aac\`, \`libopus\`, \`libvorbis\`, \`libmp3lame\`, \`libsoxr\`, \`libass\`, \`libharfbuzz\`, \`libfreetype\`, \`libfribidi\`
+          * **DTV / TV 3.0:** `liblcevc-dec`, `libmpeghdec`, `vvc` (nativo), `libaribb24`, `libxml2` (DASH)
+          * **Vídeo & Imagem:** `libx264`, `libx265` (8/10/12-bit), `libvpx`, `libdav1d`, `libsvtav1`, `nvenc`, `d3d11va`, `png`, `mjpeg`, `libwebp`, `libopenjpeg`, `libzimg`
+          * **Áudio & Legendas:** `libfdk-aac`, `libopus`, `libvorbis`, `libmp3lame`, `libsoxr`, `libass`, `libharfbuzz`, `libfreetype`, `libfribidi`
           EOF
 
       - name: Publicar Release no GitHub
@@ -115,7 +134,6 @@ jobs:
           TAG="${{ steps.check_version.outputs.release_tag }}"
           ZIP_PATH="$GITHUB_WORKSPACE/${{ steps.package.outputs.zip_name }}"
 
-          # Se force_build=true e a release já existir, apaga a antiga para recriar
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release delete "$TAG" --yes --cleanup-tag
           fi
