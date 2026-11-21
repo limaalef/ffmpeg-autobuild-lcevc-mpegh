@@ -529,6 +529,17 @@ cmake -S svt-av1 -B svt-av1/build "${CMAKE_COMMON[@]}" \
 cmake --build svt-av1/build -j"$JOBS"
 cmake --install svt-av1/build
 
+# 26. libaom (Encoder/decoder AV1 de referência da AOMedia)
+clone https://aomedia.googlesource.com/aom aom
+rm -rf aom/build_win
+cmake -S aom -B aom/build_win "${CMAKE_COMMON[@]}" \
+  -DBUILD_SHARED_LIBS=OFF \
+  -DENABLE_NASM=ON \
+  -DENABLE_DOCS=OFF -DENABLE_EXAMPLES=OFF -DENABLE_TESTS=OFF \
+  -DENABLE_TOOLS=OFF -DENABLE_TESTDATA=OFF
+cmake --build aom/build_win -j"$JOBS"
+cmake --install aom/build_win
+
 # -----------------------------------------------------------------------------
 step "6/8 Ajuste dos .pc (libstdc++) e verificação"
 # -----------------------------------------------------------------------------
@@ -657,6 +668,7 @@ export PKG_CONFIG_PATH="$WIN_PREFIX/lib/pkgconfig:$WIN_PREFIX/share/pkgconfig"
   --enable-libvpx \
   --enable-libdav1d \
   --enable-libsvtav1 \
+  --enable-libaom \
   --enable-libwebp \
   --enable-libopenjpeg \
   --enable-libzimg \
