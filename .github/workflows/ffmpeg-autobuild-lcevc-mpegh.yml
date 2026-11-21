@@ -136,7 +136,7 @@ jobs:
           * **Binários incluídos:** \`ffmpeg.exe\`, \`ffprobe.exe\`, \`ffplay.exe\`, \`mpeghDecoder.exe\`, \`mpeghUIManager.exe\`
           * **Compilador:** MinGW-w64 GCC POSIX (Static)
           * **DTV / TV 3.0:** `liblcevc-dec`, `libmpeghdec`, `vvc` (nativo), `libaribb24`, `libxml2` (DASH)
-          * **Vídeo & Imagem:** `libx264`, `libx265` (8/10/12-bit), `libvpx`, `libdav1d`, `libsvtav1`, `nvenc`, `d3d11va`, `png`, `mjpeg`, `libwebp`, `libopenjpeg`, `libzimg`
+          * **Vídeo & Imagem:** `libx264`, `libx265` (8/10/12-bit), `libvpx`, `libdav1d`, `libsvtav1`, `libaom-av1`, `nvenc`, `d3d11va`, `png`, `mjpeg`, `libwebp`, `libopenjpeg`, `libzimg`
           * **Áudio & Legendas:** `libfdk-aac`, `libopus`, `libvorbis`, `libmp3lame`, `libsoxr`, `libass`, `libharfbuzz`, `libfreetype`, `libfribidi`
           EOF
 
