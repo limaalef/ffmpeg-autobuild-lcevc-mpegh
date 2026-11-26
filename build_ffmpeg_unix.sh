@@ -259,6 +259,16 @@ build_freetype() {
     clone https://gitlab.freedesktop.org/freetype/freetype.git freetype
   fi
   cmake_build freetype freetype/build -DFT_DISABLE_HARFBUZZ=ON -DFT_DISABLE_BZIP2=ON -DFT_DISABLE_BROTLI=ON
+
+  # Teste de link imediato: se a lib estiver quebrada, falha aqui (minutos) e não só no
+  # configure do FFmpeg (horas, no macOS Intel). Mesmo teste que o configure faz.
+  local t="$BASE/ft_selftest"
+  rm -rf "$t"; mkdir -p "$t"
+  printf '#include <ft2build.h>\n#include FT_FREETYPE_H\nint main(void){FT_Library l; return FT_Init_FreeType(&l);}\n' > "$t/t.c"
+  # shellcheck disable=SC2046
+  cc "$t/t.c" -o "$t/t" $(pkg-config --cflags --libs --static freetype2) -l"$CXXLIB" \
+    || { echo "ERRO: libfreetype.a não linka (veja os símbolos indefinidos acima)"; exit 1; }
+  echo "FreeType: teste de link OK"
 }
 
 build_fribidi() {
@@ -647,7 +657,7 @@ check_deps() {
   if [ "$OS" = linux ]; then
     ldd "$b" | tee /dev/stderr \
       | awk '{print $1}' \
-      | grep -vE '^(linux-vdso|/lib64/ld-linux|ld-linux|libc\.so|libm\.so|libdl\.so|libpthread\.so|librt\.so|libresolv\.so|libutil\.so)' \
+      | grep -vE '^(linux-vdso|/lib64/ld-linux|ld-linux|libc\.so|libm\.so|libmvec\.so|libdl\.so|libpthread\.so|librt\.so|libresolv\.so|libutil\.so)' \
       > "$BASE/deps_unexpected.txt" || true
   else
     otool -L "$b" | tee /dev/stderr | tail -n +2 | awk '{print $1}' \
