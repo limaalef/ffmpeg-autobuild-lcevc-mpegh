@@ -246,7 +246,18 @@ build_zimg() {
 
 # ================= LEGENDAS & TEXTO =================
 build_freetype() {
-  clone https://gitlab.freedesktop.org/freetype/freetype.git freetype
+  # Usa a última 2.14.x estável em vez do master: o FreeType 2.15+ inclui o driver "hvf"
+  # (Apple), que no macOS compila mas depende de símbolos HVF_* inexistentes -> falha no link.
+  local ref
+  ref="$(git ls-remote --tags --refs https://gitlab.freedesktop.org/freetype/freetype.git 'VER-2-14-*' \
+    | awk -F/ '{print $3}' | sort -V | tail -n1)"
+  if [ -n "$ref" ]; then
+    echo "FreeType: usando tag $ref"
+    clone https://gitlab.freedesktop.org/freetype/freetype.git freetype --branch "$ref"
+  else
+    echo "AVISO: tag VER-2-14-* não encontrada, usando master"
+    clone https://gitlab.freedesktop.org/freetype/freetype.git freetype
+  fi
   cmake_build freetype freetype/build -DFT_DISABLE_HARFBUZZ=ON -DFT_DISABLE_BZIP2=ON -DFT_DISABLE_BROTLI=ON
 }
 
@@ -267,7 +278,12 @@ build_libass() {
   # macOS: CoreText como provedor de fontes do sistema.
   clone https://github.com/libass/libass.git libass
   local provider
-  if [ "$OS" = macos ]; then provider="-Dcoretext=enabled"; else provider="-Dcoretext=disabled"; fi
+  if [ "$OS" = macos ]; then
+    provider="-Dcoretext=enabled"
+  else
+    # Sem provedor de fontes do sistema: o meson do libass exige confirmar explicitamente
+    provider="-Drequire-system-font-provider=false"
+  fi
   meson_build libass libass/build \
     -Dfontconfig=disabled -Ddirectwrite=disabled "$provider" \
     -Dtest=disabled -Dcompare=disabled -Dprofile=disabled
