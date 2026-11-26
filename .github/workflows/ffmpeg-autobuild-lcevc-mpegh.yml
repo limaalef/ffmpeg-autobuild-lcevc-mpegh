@@ -1,5 +1,5 @@
 name: Build Custom FFmpeg (limaalef)
- 
+
 on:
   schedule:
     - cron: '0 6 * * *'
@@ -13,25 +13,32 @@ on:
         description: 'Forçar recompilação mesmo se a release já existir'
         type: boolean
         default: false
- 
+
 permissions:
   contents: write
- 
+
 env:
   # Silencia avisos de transição Node 20 -> Node 24 nas actions oficiais
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
- 
+
 jobs:
-  build_win64:
+  # ---------------------------------------------------------------------------
+  # 1) Decide a versão e se precisa compilar (roda uma vez para todas as plataformas)
+  # ---------------------------------------------------------------------------
+  prepare:
     runs-on: ubuntu-24.04
+    outputs:
+      target_ref: ${{ steps.check_version.outputs.target_ref }}
+      clean_ver: ${{ steps.check_version.outputs.clean_ver }}
+      build_date: ${{ steps.check_version.outputs.build_date }}
+      release_tag: ${{ steps.check_version.outputs.release_tag }}
+      should_build: ${{ steps.check_version.outputs.should_build }}
     steps:
-      - name: Checkout do repositório
-        uses: actions/checkout@v4
- 
       - name: Detectar versão do FFmpeg
         id: check_version
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           INPUT_REF: ${{ github.event.inputs.ffmpeg_ref }}
           FORCE: ${{ github.event.inputs.force_build }}
         run: |
@@ -45,14 +52,14 @@ jobs:
               | grep -E '^n[0-9]+\.[0-9]+(\.[0-9]+)?$' \
               | sort -V | tail -n1)
           fi
- 
+
           if [ -z "$TARGET_REF" ]; then
             TARGET_REF="master"
           fi
- 
+
           # Data da build (fuso de Brasília), formato AAAAMMDD
           BUILD_DATE=$(TZ=America/Sao_Paulo date +%Y%m%d)
- 
+
           if [ "$TARGET_REF" = "master" ]; then
             COMMIT_HASH=$(git ls-remote https://github.com/FFmpeg/FFmpeg.git refs/heads/master | cut -c1-7)
             CLEAN_VER="git-${COMMIT_HASH}"
@@ -62,17 +69,17 @@ jobs:
             RELEASE_PREFIX="ffmpeg-v${CLEAN_VER}-"
           fi
           RELEASE_TAG="${RELEASE_PREFIX}${BUILD_DATE}-limaalef"
- 
+
           echo "target_ref=$TARGET_REF" >> "$GITHUB_OUTPUT"
           echo "clean_ver=$CLEAN_VER" >> "$GITHUB_OUTPUT"
           echo "build_date=$BUILD_DATE" >> "$GITHUB_OUTPUT"
           echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
- 
+
           # A data faz parte da tag, então a checagem compara só o prefixo da versão:
           # se já existe QUALQUER release dessa versão do FFmpeg, não recompila.
           EXISTING=$(gh release list --limit 1000 --json tagName \
             --jq ".[] | select(.tagName | startswith(\"${RELEASE_PREFIX}\")) | .tagName" 2>/dev/null | head -n1)
- 
+
           if [ -n "$EXISTING" ] && [ "$FORCE" != "true" ]; then
             echo "Versão já publicada na release $EXISTING. Encerrando."
             echo "should_build=false" >> "$GITHUB_OUTPUT"
@@ -80,79 +87,193 @@ jobs:
             echo "Nova build necessária: $RELEASE_TAG (ref: $TARGET_REF)"
             echo "should_build=true" >> "$GITHUB_OUTPUT"
           fi
- 
-      - name: Cache das bibliotecas compiladas (win64_prefix)
-        if: steps.check_version.outputs.should_build == 'true'
+
+  # ---------------------------------------------------------------------------
+  # 2) Compila cada plataforma em paralelo e sobe o pacote como artifact
+  # ---------------------------------------------------------------------------
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.should_build == 'true'
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: win64
+            runner: ubuntu-24.04
+            script: build_ffmpeg_win64.sh
+            base: build_win64
+            prefix: build_win64/win64_prefix
+          - target: linux64
+            runner: ubuntu-24.04
+            script: build_ffmpeg_unix.sh
+            base: build_linux64
+            prefix: build_linux64/prefix
+          - target: macos-intel
+            runner: macos-15-intel
+            script: build_ffmpeg_unix.sh
+            base: build_macos-intel
+            prefix: build_macos-intel/prefix
+          - target: macos-arm64
+            runner: macos-15
+            script: build_ffmpeg_unix.sh
+            base: build_macos-arm64
+            prefix: build_macos-arm64/prefix
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: Mês atual (renova o cache das bibliotecas uma vez por mês)
+        id: month
+        run: echo "ym=$(date +%Y-%m)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache das bibliotecas compiladas
         uses: actions/cache@v4
         with:
-          path: ~/build_win64/win64_prefix
-          key: win64-prefix-v3-${{ hashFiles('build_ffmpeg_win64.sh') }}
- 
+          path: ~/${{ matrix.prefix }}
+          key: ${{ matrix.target }}-prefix-v4-${{ steps.month.outputs.ym }}-${{ hashFiles(matrix.script) }}
+
       - name: Compilar FFmpeg e bibliotecas
-        if: steps.check_version.outputs.should_build == 'true'
         env:
-          FFMPEG_BRANCH: ${{ steps.check_version.outputs.target_ref }}
+          FFMPEG_BRANCH: ${{ needs.prepare.outputs.target_ref }}
         run: |
           # Remove quebras de linha CRLF do Windows caso existam no script
-          sed -i 's/\r$//' build_ffmpeg_win64.sh
-          chmod +x build_ffmpeg_win64.sh
-          ./build_ffmpeg_win64.sh
- 
+          perl -pi -e 's/\r$//' "${{ matrix.script }}"
+          chmod +x "${{ matrix.script }}"
+          if [ "${{ matrix.target }}" = "win64" ]; then
+            ./${{ matrix.script }}
+          else
+            ./${{ matrix.script }} "${{ matrix.target }}"
+          fi
+
       - name: Exibir log de erro detalhado (se a compilação falhar)
         if: failure()
         run: |
           echo "=== ÚLTIMAS 100 LINHAS DO BUILD.LOG ==="
-          tail -n 100 ~/build_win64/build.log || true
+          tail -n 100 ~/${{ matrix.base }}/build.log || true
           echo "=== ÚLTIMAS 80 LINHAS DO FFBUILD/CONFIG.LOG (SE EXISTIR) ==="
-          tail -n 80 ~/build_win64/src/ffmpeg/ffbuild/config.log || true
+          tail -n 80 ~/${{ matrix.base }}/src/ffmpeg/ffbuild/config.log || true
 
-      - name: Empacotar binários e gerar notas da versão
-        if: steps.check_version.outputs.should_build == 'true'
+      - name: Empacotar binários
         id: package
+        env:
+          TARGET: ${{ matrix.target }}
+          BASE_DIR: ${{ matrix.base }}
+          CLEAN_VER: ${{ needs.prepare.outputs.clean_ver }}
+          BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
         run: |
-          OUT_BIN="$HOME/build_win64/ffmpeg_out/bin"
-          PREFIX_BIN="$HOME/build_win64/win64_prefix/bin"
-          ZIP_NAME="ffmpeg-${{ steps.check_version.outputs.clean_ver }}-${{ steps.check_version.outputs.build_date }}-win64-static-limaalef.zip"
- 
-          # Copia SOMENTE as ferramentas do mpeghdec (o prefix também contém exes de
-          # libjpeg-turbo, xz etc. que não devem ir para o zip). O "cmake --install"
-          # não as instala, então buscamos na pasta de build e, por garantia, no prefix.
-          MPEGH_BUILD_BIN="$HOME/build_win64/src/mpeghdec/build/bin"
-          find "$MPEGH_BUILD_BIN" "$PREFIX_BIN" -maxdepth 1 -iname 'mpegh*.exe' \
-            -exec cp -f {} "$OUT_BIN"/ \; 2>/dev/null || true
- 
-          # Garante que o ffplay.exe também foi copiado se gerado em subpastas
-          find "$HOME/build_win64/src/ffmpeg" -name "ffplay.exe" -exec cp -f {} "$OUT_BIN"/ \; 2>/dev/null || true
+          set -euo pipefail
+          OUT_BIN="$HOME/$BASE_DIR/ffmpeg_out/bin"
+          NAME="ffmpeg-${CLEAN_VER}-${BUILD_DATE}"
 
-          cd "$OUT_BIN"
-          # Compacta todos os executáveis (.exe) juntos no .zip final
-          7z a "$GITHUB_WORKSPACE/$ZIP_NAME" *.exe
+          if [ "$TARGET" = "win64" ]; then
+            PREFIX_BIN="$HOME/build_win64/win64_prefix/bin"
+            ASSET="${NAME}-win64-static-limaalef.zip"
 
-          echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
+            # Copia SOMENTE as ferramentas do mpeghdec (o prefix também contém exes de
+            # libjpeg-turbo, xz etc. que não devem ir para o zip). O "cmake --install"
+            # não as instala, então buscamos na pasta de build e, por garantia, no prefix.
+            MPEGH_BUILD_BIN="$HOME/build_win64/src/mpeghdec/build/bin"
+            find "$MPEGH_BUILD_BIN" "$PREFIX_BIN" -maxdepth 1 -iname 'mpegh*.exe' \
+              -exec cp -f {} "$OUT_BIN"/ \; 2>/dev/null || true
 
-          cat > "$GITHUB_WORKSPACE/release_notes.md" << 'EOF'
-          ### FFmpeg ${{ steps.check_version.outputs.clean_ver }} (Windows x64 Static) — Build by **limaalef**
+            # Garante que o ffplay.exe também foi copiado se gerado em subpastas
+            find "$HOME/build_win64/src/ffmpeg" -name "ffplay.exe" -exec cp -f {} "$OUT_BIN"/ \; 2>/dev/null || true
 
-          * **Binários incluídos:** \`ffmpeg.exe\`, \`ffprobe.exe\`, \`ffplay.exe\`, \`mpeghDecoder.exe\`, \`mpeghUIManager.exe\`
-          * **Compilador:** MinGW-w64 GCC POSIX (Static)
-          * **DTV / TV 3.0:** `liblcevc-dec`, `libmpeghdec`, `vvc` (nativo), `libaribb24`, `libxml2` (DASH)
-          * **Vídeo & Imagem:** `libx264`, `libx265` (8/10/12-bit), `libvpx`, `libdav1d`, `libsvtav1`, `libaom-av1`, `nvenc`, `d3d11va`, `png`, `mjpeg`, `libwebp`, `libopenjpeg`, `libzimg`
-          * **Áudio & Legendas:** `libfdk-aac`, `libopus`, `libvorbis`, `libmp3lame`, `libsoxr`, `libass`, `libharfbuzz`, `libfreetype`, `libfribidi`
+            cd "$OUT_BIN"
+            7z a "$GITHUB_WORKSPACE/$ASSET" *.exe
+          else
+            case "$TARGET" in
+              linux64)     SUFFIX="linux64-static-limaalef" ;;
+              macos-intel) SUFFIX="macos-intel-limaalef" ;;
+              macos-arm64) SUFFIX="macos-arm64-limaalef" ;;
+            esac
+            PREFIX_BIN="$HOME/$BASE_DIR/prefix/bin"
+
+            # Ferramentas do mpeghdec ficam guardadas no prefixo (que é cacheado)
+            find "$PREFIX_BIN" -maxdepth 1 -type f -iname 'mpegh*' -exec cp -f {} "$OUT_BIN"/ \;
+
+            cd "$OUT_BIN"
+            FILES=()
+            for f in ffmpeg ffprobe ffplay mpeghDecoder mpeghUIManager; do
+              [ -f "$f" ] && FILES+=("$f")
+            done
+            echo "Empacotando: ${FILES[*]}"
+
+            if [ "$TARGET" = "linux64" ]; then
+              ASSET="${NAME}-${SUFFIX}.tar.xz"
+              tar -cJf "$GITHUB_WORKSPACE/$ASSET" "${FILES[@]}"
+            else
+              ASSET="${NAME}-${SUFFIX}.zip"
+              zip -9 "$GITHUB_WORKSPACE/$ASSET" "${FILES[@]}"
+            fi
+          fi
+          echo "asset_name=$ASSET" >> "$GITHUB_OUTPUT"
+
+      - name: Enviar pacote como artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-${{ matrix.target }}
+          path: ${{ github.workspace }}/${{ steps.package.outputs.asset_name }}
+          if-no-files-found: error
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # 3) Só publica se TODAS as plataformas compilaram. Assim, uma falha parcial não
+  #    cria uma release incompleta que faria o "já existe" pular o rebuild depois.
+  # ---------------------------------------------------------------------------
+  release:
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Baixar pacotes de todas as plataformas
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ffmpeg-*
+          path: dist
+          merge-multiple: true
+
+      - name: Gerar checksums e notas da versão
+        env:
+          CLEAN_VER: ${{ needs.prepare.outputs.clean_ver }}
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS.txt
+          ls -lh
+          cd ..
+
+          cat > release_notes.md << EOF
+          ### FFmpeg ${CLEAN_VER} — Build by **limaalef**
+
+          | Plataforma | Arquivo | Observações |
+          |---|---|---|
+          | Windows x64 | \`*-win64-static-limaalef.zip\` | Totalmente estático. \`ffmpeg\`, \`ffprobe\`, \`ffplay\`, \`mpeghDecoder\`, \`mpeghUIManager\` |
+          | Linux x64 | \`*-linux64-static-limaalef.tar.xz\` | Libs estáticas, glibc dinâmica (Ubuntu 24.04 → exige glibc >= 2.39). Sem \`ffplay\` |
+          | macOS Intel | \`*-macos-intel-limaalef.zip\` | Libs estáticas, só frameworks do sistema. Mínimo macOS 11 |
+          | macOS Apple Silicon | \`*-macos-arm64-limaalef.zip\` | Libs estáticas, só frameworks do sistema. Mínimo macOS 11 |
+
+          * **DTV / TV 3.0:** \`liblcevc-dec\`, \`libmpeghdec\`, \`vvc\` (nativo), \`libaribb24\`, \`libxml2\` (DASH)
+          * **Vídeo & Imagem:** \`libx264\`, \`libx265\` (8/10/12-bit), \`libvpx\`, \`libdav1d\`, \`libsvtav1\`, \`libaom-av1\`, \`png\`, \`mjpeg\`, \`libwebp\`, \`libopenjpeg\`, \`libzimg\`
+          * **Aceleração:** Windows \`nvenc\`/\`d3d11va\`/\`dxva2\`; Linux \`nvenc\` (requer driver NVIDIA); macOS \`videotoolbox\`/\`audiotoolbox\`
+          * **Áudio & Legendas:** \`libfdk-aac\`, \`libopus\`, \`libvorbis\`, \`libmp3lame\`, \`libsoxr\`, \`libass\`, \`libharfbuzz\`, \`libfreetype\`, \`libfribidi\`
+          * **TLS:** Windows \`schannel\`; Linux/macOS \`openssl\` (estático)
+          * Verifique a integridade com \`SHA256SUMS.txt\`.
           EOF
 
       - name: Publicar Release no GitHub
-        if: steps.check_version.outputs.should_build == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.prepare.outputs.release_tag }}
+          CLEAN_VER: ${{ needs.prepare.outputs.clean_ver }}
+          BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
         run: |
-          TAG="${{ steps.check_version.outputs.release_tag }}"
-          ZIP_PATH="$GITHUB_WORKSPACE/${{ steps.package.outputs.zip_name }}"
- 
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release delete "$TAG" --yes --cleanup-tag
           fi
- 
-          gh release create "$TAG" "$ZIP_PATH" \
-            --title "FFmpeg ${{ steps.check_version.outputs.clean_ver }} Win64 Static ${{ steps.check_version.outputs.build_date }} (by limaalef)" \
-            --notes-file "$GITHUB_WORKSPACE/release_notes.md" \
+
+          gh release create "$TAG" dist/* \
+            --title "FFmpeg ${CLEAN_VER} Static ${BUILD_DATE} — Win64 / Linux / macOS (by limaalef)" \
+            --notes-file release_notes.md \
             --latest
